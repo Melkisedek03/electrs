@@ -1,0 +1,909 @@
+use clap::{App, Arg};
+use dirs::home_dir;
+use std::fmt;
+use std::fs;
+use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use stderrlog;
+
+use crate::chain::Network;
+use crate::daemon::CookieGetter;
+use crate::errors::*;
+
+#[cfg(feature = "liquid")]
+use bitcoin::Network as BNetwork;
+
+const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Clone)]
+pub struct SensitiveAuth(String);
+
+impl SensitiveAuth {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl fmt::Debug for SensitiveAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let username = self
+            .0
+            .split_once(':')
+            .map(|(username, _)| username)
+            .unwrap_or("<invalid>");
+        f.debug_tuple("UserPass")
+            .field(&username)
+            .field(&"<sensitive>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    // See below for the documentation of each field:
+    pub log: stderrlog::StdErrLog,
+    pub network_type: Network,
+    pub db_path: PathBuf,
+    pub daemon_dir: PathBuf,
+    pub blocks_dir: PathBuf,
+    pub daemon_rpc_addr: SocketAddr,
+    pub daemon_rpc_fallback_addr: Option<SocketAddr>,
+    pub daemon_parallelism: usize,
+    pub daemon_conn_max_age: Option<Duration>,
+    pub cookie: Option<SensitiveAuth>,
+    pub electrum_rpc_addr: SocketAddr,
+    pub electrum_rpc_conn_max_age: Option<Duration>,
+    pub electrum_rpc_write_timeout: Option<Duration>,
+    pub electrum_rpc_max_request_num_bytes: usize,
+    pub electrum_rpc_max_response_num_bytes: usize,
+    pub electrum_rpc_global_response_budget_bytes: usize,
+    pub http_addr: SocketAddr,
+    pub http_socket_file: Option<PathBuf>,
+    pub monitoring_addr: SocketAddr,
+    pub jsonrpc_import: bool,
+    pub light_mode: bool,
+    pub address_search: bool,
+    pub index_unspendables: bool,
+    pub enable_mining_rest: bool,
+    pub cors: Option<String>,
+    pub precache_scripts: Option<String>,
+    pub utxos_limit: usize,
+    pub history_scan_limit: usize,
+    pub utxos_checkpoint_limit: usize,
+    pub electrum_txs_limit: usize,
+    pub electrum_subscription_limit: usize,
+    pub electrum_checkpoint_proof_concurrency_limit: usize,
+    pub electrum_checkpoint_merkle_cache_mb: usize,
+    pub electrum_banner: String,
+    pub rpc_logging: RpcLogging,
+    pub zmq_addr: Option<SocketAddr>,
+
+    /// RocksDB block cache size in MB (per database)
+    /// Caches decompressed data blocks, plus index and filter blocks (via cache_index_and_filter_blocks).
+    /// Total memory usage = cache_size * 3_databases (txstore, history, cache)
+    /// Recommendation: 1024 MB for steady-state; 4096 MB+ for initial sync (L0 SST
+    /// files accumulate up to the compaction trigger — their index, filter (Bloom),
+    /// and data blocks must fit in this cache). With 10 bits/key bloom filters and
+    /// a 512 MB write buffer, each L0 file's filter block is ~9.75 MB, so 64 L0
+    /// files need ~625 MB of filter blocks on top of index blocks.
+    pub db_block_cache_mb: usize,
+
+    /// RocksDB parallelism level (background compaction and flush threads)
+    /// Recommendation: Set to number of CPU cores for optimal performance
+    /// This configures max_background_jobs and thread pools automatically
+    pub db_parallelism: usize,
+
+    /// RocksDB write buffer size in MB (per database)
+    /// Each database uses this much RAM for in-memory writes before flushing to disk
+    /// Total RAM usage = write_buffer_size * max_write_buffer_number * 3_databases
+    /// Larger buffers = fewer flushes (less CPU) but more RAM usage
+    pub db_write_buffer_size_mb: usize,
+
+    /// Number of blocks per batch during initial sync (bitcoind fetch mode).
+    /// Larger batches keep more O rows in the write buffer when index() runs lookup_txos(),
+    /// improving cache hit rate for outputs spent within the same batch window.
+    /// Must stay within db_write_buffer_size_mb to avoid mid-batch flushes.
+    pub initial_sync_batch_size: usize,
+
+    /// Store index and filter blocks inside the block cache (default: false).
+    /// When enabled, bounds memory but allows eviction under pressure.
+    /// When disabled (default), index/filter blocks stay on the heap and are
+    /// may never be evicted, giving better read performance at the cost of ~18 MB
+    /// per SST file of unbounded memory.
+    pub db_cache_index_filter_blocks: bool,
+
+    #[cfg(feature = "liquid")]
+    pub parent_network: BNetwork,
+    #[cfg(feature = "liquid")]
+    pub asset_db_path: Option<PathBuf>,
+
+    #[cfg(feature = "electrum-discovery")]
+    pub electrum_public_hosts: Option<crate::electrum::ServerHosts>,
+    #[cfg(feature = "electrum-discovery")]
+    pub electrum_announce: bool,
+    #[cfg(feature = "electrum-discovery")]
+    pub tor_proxy: Option<std::net::SocketAddr>,
+}
+
+fn str_to_socketaddr(address: &str, what: &str) -> SocketAddr {
+    address
+        .to_socket_addrs()
+        .unwrap_or_else(|_| panic!("unable to resolve {} address", what))
+        .collect::<Vec<_>>()
+        .pop()
+        .unwrap()
+}
+
+fn value_or_default_or_exit(
+    m: &clap::ArgMatches,
+    arg_name: &str,
+    cli_name: &str,
+    default: usize,
+) -> usize {
+    match m.value_of(arg_name) {
+        None => default,
+        Some(raw) => raw.parse::<usize>().unwrap_or_else(|_| {
+            clap::Error::with_description(
+                &format!("--{} expects a non-negative integer (got {:?})", cli_name, raw),
+                clap::ErrorKind::ValueValidation,
+            )
+            .exit()
+        }),
+    }
+}
+
+impl Config {
+    pub fn from_args() -> Config {
+        let network_help = format!("Select network type ({})", Network::names().join(", "));
+
+        let args = App::new("Electrum Rust Server")
+            .version(crate_version!())
+            .arg(
+                Arg::with_name("verbosity")
+                    .short("v")
+                    .multiple(true)
+                    .help("Increase logging verbosity (default: info, -v: debug, -vv: trace)"),
+            )
+            .arg(
+                Arg::with_name("timestamp")
+                    .long("timestamp")
+                    .help("Prepend log lines with a timestamp"),
+            )
+            .arg(
+                Arg::with_name("db_dir")
+                    .long("db-dir")
+                    .help("Directory to store index database (default: ./db/)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("daemon_dir")
+                    .long("daemon-dir")
+                    .help("Data directory of Bitcoind (default: ~/.bitcoin/)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("blocks_dir")
+                    .long("blocks-dir")
+                    .help("Analogous to bitcoind's -blocksdir option, this specifies the directory containing the raw blocks files (blk*.dat) (default: ~/.bitcoin/blocks/)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("cookie")
+                    .long("cookie")
+                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from ~/.bitcoin/.cookie)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("network")
+                    .long("network")
+                    .help(&network_help)
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("electrum_rpc_addr")
+                    .long("electrum-rpc-addr")
+                    .help("Electrum server JSONRPC 'addr:port' to listen on (default: '127.0.0.1:50001' for mainnet, '127.0.0.1:60001' for testnet3, '127.0.0.1:40001' for testnet4 and '127.0.0.1:60401' for regtest)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("electrum_rpc_conn_max_age")
+                    .long("electrum-rpc-conn-max-age")
+                    .help("Maximum age (in seconds) of inbound Electrum RPC TCP connections. Each connection is closed at a randomly selected age between 50% and 100% of this value so clients reconnect gradually and load balancers can redistribute them. 0 = unlimited / never disconnect (default)")
+                    .default_value("0")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("electrum_rpc_write_timeout")
+                    .long("electrum-rpc-write-timeout")
+                    .help("Maximum time (in seconds) to transmit a complete Electrum response, including a whole batch, errors, or a notification. Starts at the first write and is not extended by partial progress. Closes stalled connections and releases response buffers. Does not time idle subscriptions or command execution. 0 = disabled, which requires --electrum-rpc-conn-max-age or an unlimited --electrum-rpc-global-response-budget-bytes (default: 30).")
+                    .default_value("30")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("electrum_rpc_max_request_num_bytes")
+                    .long("electrum-rpc-max-request-num-bytes")
+                    .help("Maximum size (in bytes) of a single Electrum RPC request line. A client streaming bytes without a newline is disconnected once its in-flight line exceeds this size, bounding per-connection memory. 0 = unlimited (default: 1048576, i.e. 1 MiB)")
+                    .default_value("1048576")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("electrum_rpc_max_response_num_bytes")
+                    .long("electrum-rpc-max-response-num-bytes")
+                    .help("Maximum size (in bytes) of a single Electrum RPC solicited reply line, including brackets, commas, error objects, and terminating newline. Applies to singles, batches, parse errors, and invalid-request errors; subscription notifications are exempt. When a reply cannot fit, the client receives a correlated error (code 1) for the overflowing element and later batch elements are not executed. 0 = unlimited (default: 8388608, i.e. 8 MiB on Bitcoin; 33554432, i.e. 32 MiB on Liquid, sized for a 2016-header window during a dynafed parameter vote).")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("electrum_rpc_global_response_budget_bytes")
+                    .long("electrum-rpc-global-response-budget-bytes")
+                    .help("Aggregate cap (in bytes) on Electrum solicited-reply buffer memory retained across all connections at any instant, including batch replies held while later batch elements execute and replies held while writer threads block on non-reading clients. Subscription notifications and queued request lines are not counted. Small replies (< 16 KiB per connection) are exempt; above that floor each reply charges the budget in 64 KiB chunks (or a smaller final chunk) and releases on drop. Requests that would exceed the budget are rejected with a server error (code 2) instead of allocating. Must be >= --electrum-rpc-max-response-num-bytes so a single maximum-size reply can succeed, and requires a non-zero --electrum-rpc-write-timeout or --electrum-rpc-conn-max-age so stalled clients release their share. 0 = unlimited (default: 67108864, i.e. 64 MiB on Bitcoin; 268435456, i.e. 256 MiB on Liquid, keeping the same ratio to the per-line cap).")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("http_addr")
+                    .long("http-addr")
+                    .help("HTTP server 'addr:port' to listen on (default: '127.0.0.1:3000' for mainnet, '127.0.0.1:3001' for testnet3 and '127.0.0.1:3004' for testnet4 and '127.0.0.1:3002' for regtest)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("daemon_rpc_addr")
+                    .long("daemon-rpc-addr")
+                    .help("Bitcoin daemon JSONRPC 'addr:port' to connect (default: 127.0.0.1:8332 for mainnet, 127.0.0.1:18332 for testnet3 and 127.0.0.1:48332 for testnet4 and 127.0.0.1:18443 for regtest)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("daemon_rpc_fallback_addr")
+                    .long("daemon-rpc-fallback-addr")
+                    .help("Fallback Bitcoin daemon JSONRPC 'addr:port' to connect if the primary fails")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("daemon_parallelism")
+                    .long("daemon-parallelism")
+                    .help("Number of JSONRPC requests to send in parallel")
+                    .default_value("4")
+            )
+            .arg(
+                Arg::with_name("daemon_rpc_conn_max_age")
+                    .long("daemon-rpc-conn-max-age")
+                    .help("Max age (in seconds) of a daemon RPC TCP connection before it is proactively recycled. Recycling re-establishes the connection, letting a load balancer (e.g. a Kubernetes ClusterSetIP) re-select a backend after node rotations. The reconnect happens inline on the next request, so prefer a generous value (minutes, not seconds) to avoid periodic latency spikes. 0 = unlimited / never recycle (default)")
+                    .default_value("0")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("monitoring_addr")
+                    .long("monitoring-addr")
+                    .help("Prometheus monitoring 'addr:port' to listen on (default: 127.0.0.1:4224 for mainnet, 127.0.0.1:14224 for testnet3 and 127.0.0.1:44224 for testnet4 and 127.0.0.1:24224 for regtest)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("jsonrpc_import")
+                    .long("jsonrpc-import")
+                    .help("Use JSONRPC instead of directly importing blk*.dat files. Useful for remote full node or low memory system"),
+            )
+            .arg(
+                Arg::with_name("light_mode")
+                    .long("lightmode")
+                    .help("Enable light mode for reduced storage")
+            )
+            .arg(
+                Arg::with_name("address_search")
+                    .long("address-search")
+                    .help("Enable prefix address search")
+            )
+            .arg(
+                Arg::with_name("index_unspendables")
+                    .long("index-unspendables")
+                    .help("Enable indexing of provably unspendable outputs")
+            )
+            .arg(
+                Arg::with_name("enable_mining_rest")
+                    .long("enable-mining-rest")
+                    .help("Enable cached mining-related HTTP endpoints")
+            )
+            .arg(
+                Arg::with_name("cors")
+                    .long("cors")
+                    .help("Origins allowed to make cross-site requests")
+                    .takes_value(true)
+            )
+            .arg(
+                Arg::with_name("precache_scripts")
+                    .long("precache-scripts")
+                    .help("Path to file with list of scripts to pre-cache")
+                    .takes_value(true)
+            )
+            .arg(
+                Arg::with_name("utxos_limit")
+                    .long("utxos-limit")
+                    .help("Maximum number of utxos to process per address. Lookups for addresses with more utxos will fail. Applies to the Electrum and HTTP APIs.")
+                    .default_value("500")
+            )
+            .arg(
+                Arg::with_name("history_scan_limit")
+                    .long("history-scan-limit")
+                    .help("Approximate number of scripthash history rows scanned per utxo/stats lookup before giving up with a \"too popular\" error (the scan reads through the end of the height it is on when the limit is reached, so it may process somewhat more). Unlike --utxos-limit and --electrum-txs-limit, which cap the size of the result, this bounds the amount of work done per request regardless of the outcome. Must be at least 1.")
+                    .default_value("100000")
+            )
+            .arg(
+                Arg::with_name("utxos_checkpoint_limit")
+                    .long("utxos-checkpoint-limit")
+                    .help("Maximum number of utxos held in a partially scanned utxo set, and in the checkpoint saved for it. An address whose utxo set grows past this while scanning fails with a \"too popular\" error and no checkpoint is saved. Also bounds the unconfirmed history entries scanned per address for utxo and stats lookups. Must be at least --utxos-limit (default: 10 times --utxos-limit).")
+                    .takes_value(true)
+            )
+            .arg(
+                Arg::with_name("electrum_txs_limit")
+                    .long("electrum-txs-limit")
+                    .help("Maximum number of transactions returned by Electrum history queries. Lookups with more results will fail.")
+                    .default_value("500")
+            ).arg(
+                Arg::with_name("electrum_subscription_limit")
+                    .long("electrum-subscription-limit")
+                    .help("Maximum number of scripthash subscriptions a single Electrum connection may hold. Every subscription costs a history lookup on each new block, so an unbounded count lets one client impose unbounded recurring work. Re-subscribing to an already-tracked scripthash is always allowed. 0 = unlimited.")
+                    .default_value("10000")
+                    .takes_value(true)
+            ).arg(
+                Arg::with_name("electrum_checkpoint_proof_concurrency_limit")
+                    .long("electrum-checkpoint-proof-concurrency-limit")
+                    .help("Maximum number of blockchain.block.header(s) checkpoint Merkle proof tree rebuilds (a non-zero cp_height not already cached) allowed to run at once, process-wide. Rebuilds past the cap fail immediately rather than queueing. Cached lookups (the common case once a cp_height has been served once) are never subject to this limit. Default: half the detected CPU cores (min 1). 0 = reject all rebuilds.")
+                    .takes_value(true)
+            ).arg(
+                Arg::with_name("electrum_checkpoint_merkle_cache_mb")
+                    .long("electrum-checkpoint-merkle-cache-mb")
+                    .help("Approximate memory budget, in MB, for checkpoint Merkle proof handling: cached trees and the working memory of concurrent rebuilds share this one budget (independently of electrum-checkpoint-proof-concurrency-limit, so a high core count can no longer multiply memory use past it). Cached trees use at most half of it, so a full cache still leaves room for rebuilds. It is a soft target based on an estimate, not a hard ceiling. Entry size scales with cp_height (up to ~28MB near the chain tip). A cp_height too large to ever fit is served without being cached.")
+                    .default_value("256")
+                    .takes_value(true)
+            ).arg(
+                Arg::with_name("electrum_banner")
+                    .long("electrum-banner")
+                    .help("Welcome banner for the Electrum server, shown in the console to clients.")
+                    .takes_value(true)
+            ).arg(
+                Arg::with_name("enable_json_rpc_logging")
+                    .long("enable-json-rpc-logging")
+                    .help("turns on rpc logging")
+                    .takes_value(false)
+            ).arg(
+                Arg::with_name("hide_json_rpc_logging_parameters")
+                    .long("hide-json-rpc-logging-parameters")
+                    .help("disables parameter printing in rpc logs")
+                    .takes_value(false)
+            ).arg(
+                Arg::with_name("anonymize_json_rpc_logging_source_ip")
+                    .long("anonymize-json-rpc-logging-source-ip")
+                    .help("enables ip anonymization in rpc logs")
+                    .takes_value(false)
+            ).arg(
+                Arg::with_name("db_block_cache_mb")
+                    .long("db-block-cache-mb")
+                    .help("RocksDB block cache size in MB (shared across all databases). Bounds index/filter block memory; use 4096+ for initial sync to avoid table-reader heap growth.")
+                    .takes_value(true)
+                    .default_value("24")
+            ).arg(
+                Arg::with_name("db_parallelism")
+                    .long("db-parallelism")
+                    .help("RocksDB parallelism level. Set to number of CPU cores for optimal performance")
+                    .takes_value(true)
+                    .default_value("2")
+            ).arg(
+                Arg::with_name("db_write_buffer_size_mb")
+                    .long("db-write-buffer-size-mb")
+                    .help("RocksDB write buffer size in MB per database. RAM usage = size * max_write_buffers(2) * 3_databases")
+                    .takes_value(true)
+                    .default_value("256")
+             ).arg(
+                Arg::with_name("initial_sync_batch_size")
+                    .long("initial-sync-batch-size")
+                    .help("Number of blocks per batch during initial sync. Larger values keep more txo rows in the write buffer during indexing, improving lookup_txos cache hit rate for recently-created outputs.")
+                    .takes_value(true)
+                    .default_value("250")
+             ).arg(
+                Arg::with_name("cache_index_filter_blocks")
+                    .long("cache-index-filter-blocks")
+                    .help("Store index/filter blocks in the block cache instead of on the heap. Bounds memory but allows eviction under cache pressure.")
+             ).arg(
+                Arg::with_name("zmq_addr")
+                    .long("zmq-addr")
+                    .help("Optional zmq socket address of the bitcoind daemon")
+                    .takes_value(true),
+            );
+
+        #[cfg(unix)]
+        let args = args.arg(
+                Arg::with_name("http_socket_file")
+                    .long("http-socket-file")
+                    .help("HTTP server 'unix socket file' to listen on (default disabled, enabling this disables the http server)")
+                    .takes_value(true),
+            );
+
+        #[cfg(feature = "liquid")]
+        let args = args
+            .arg(
+                Arg::with_name("parent_network")
+                    .long("parent-network")
+                    .help("Select parent network type (mainnet, testnet, regtest)")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("asset_db_path")
+                    .long("asset-db-path")
+                    .help("Directory for liquid/elements asset db")
+                    .takes_value(true),
+            );
+
+        #[cfg(feature = "electrum-discovery")]
+        let args = args.arg(
+                Arg::with_name("electrum_public_hosts")
+                    .long("electrum-public-hosts")
+                    .help("A dictionary of hosts where the Electrum server can be reached at. Required to enable server discovery. See https://electrum-protocol.readthedocs.io/en/latest/protocol-methods.html#server-features")
+                    .takes_value(true)
+            ).arg(
+                Arg::with_name("electrum_announce")
+                    .long("electrum-announce")
+                    .help("Announce the Electrum server to other servers")
+            ).arg(
+            Arg::with_name("tor_proxy")
+                .long("tor-proxy")
+                .help("ip:addr of socks proxy for accessing onion hosts")
+                .takes_value(true),
+        );
+
+        let m = args.get_matches();
+
+        let network_name = m.value_of("network").unwrap_or("mainnet");
+        let network_type = Network::from(network_name);
+        let db_dir = Path::new(m.value_of("db_dir").unwrap_or("./db"));
+        let db_path = db_dir.join(network_name);
+
+        #[cfg(feature = "liquid")]
+        let parent_network = m
+            .value_of("parent_network")
+            .map(|s| s.parse().expect("invalid parent network"))
+            .unwrap_or_else(|| match network_type {
+                Network::Liquid => BNetwork::Bitcoin,
+                // XXX liquid testnet/regtest don't have a parent chain
+                Network::LiquidTestnet | Network::LiquidRegtest => BNetwork::Regtest,
+            });
+
+        #[cfg(feature = "liquid")]
+        let asset_db_path = m.value_of("asset_db_path").map(PathBuf::from);
+
+        let default_daemon_port = match network_type {
+            #[cfg(not(feature = "liquid"))]
+            Network::Bitcoin => 8332,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet => 18332,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet4 => 48332,
+            #[cfg(not(feature = "liquid"))]
+            Network::Regtest => 18443,
+            #[cfg(not(feature = "liquid"))]
+            Network::Signet => 38332,
+            // Nusacoin Core mainnet RPC port, see chainparamsbase.cpp
+            #[cfg(not(feature = "liquid"))]
+            Network::Nusacoin => 28832,
+
+            #[cfg(feature = "liquid")]
+            Network::Liquid => 7041,
+            #[cfg(feature = "liquid")]
+            Network::LiquidTestnet | Network::LiquidRegtest => 7040,
+        };
+        let default_electrum_port = match network_type {
+            #[cfg(not(feature = "liquid"))]
+            Network::Bitcoin => 50001,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet => 60001,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet4 => 40001,
+            #[cfg(not(feature = "liquid"))]
+            Network::Regtest => 60401,
+            #[cfg(not(feature = "liquid"))]
+            Network::Signet => 60601,
+            #[cfg(not(feature = "liquid"))]
+            Network::Nusacoin => 50009,
+
+            #[cfg(feature = "liquid")]
+            Network::Liquid => 51000,
+            #[cfg(feature = "liquid")]
+            Network::LiquidTestnet => 51301,
+            #[cfg(feature = "liquid")]
+            Network::LiquidRegtest => 51401,
+        };
+        #[cfg(not(feature = "liquid"))]
+        let default_electrum_rpc_max_response_num_bytes: usize = 8_388_608;
+        #[cfg(feature = "liquid")]
+        let default_electrum_rpc_max_response_num_bytes: usize = 33_554_432;
+        let default_electrum_rpc_global_response_budget_bytes: usize =
+            default_electrum_rpc_max_response_num_bytes.saturating_mul(8);
+        let default_http_port = match network_type {
+            #[cfg(not(feature = "liquid"))]
+            Network::Bitcoin => 3000,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet => 3001,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet4 => 3004,
+            #[cfg(not(feature = "liquid"))]
+            Network::Regtest => 3002,
+            #[cfg(not(feature = "liquid"))]
+            Network::Signet => 3003,
+            #[cfg(not(feature = "liquid"))]
+            Network::Nusacoin => 3010,
+
+            #[cfg(feature = "liquid")]
+            Network::Liquid => 3000,
+            #[cfg(feature = "liquid")]
+            Network::LiquidTestnet => 3001,
+            #[cfg(feature = "liquid")]
+            Network::LiquidRegtest => 3002,
+        };
+        let default_monitoring_port = match network_type {
+            #[cfg(not(feature = "liquid"))]
+            Network::Bitcoin => 4224,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet => 14224,
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet4 => 44224,
+            #[cfg(not(feature = "liquid"))]
+            Network::Regtest => 24224,
+            #[cfg(not(feature = "liquid"))]
+            Network::Signet => 54224,
+            #[cfg(not(feature = "liquid"))]
+            Network::Nusacoin => 4225,
+
+            #[cfg(feature = "liquid")]
+            Network::Liquid => 34224,
+            #[cfg(feature = "liquid")]
+            Network::LiquidTestnet => 44324,
+            #[cfg(feature = "liquid")]
+            Network::LiquidRegtest => 44224,
+        };
+
+        let daemon_rpc_addr: SocketAddr = str_to_socketaddr(
+            m.value_of("daemon_rpc_addr")
+                .unwrap_or(&format!("127.0.0.1:{}", default_daemon_port)),
+            "Bitcoin RPC",
+        );
+        let daemon_rpc_fallback_addr: Option<SocketAddr> = m
+            .value_of("daemon_rpc_fallback_addr")
+            .map(|e| str_to_socketaddr(e, "Bitcoin Fallback RPC"));
+
+        let daemon_conn_max_age: Option<Duration> =
+            match value_t_or_exit!(m, "daemon_rpc_conn_max_age", u64) {
+                0 => None, // 0 = unlimited / never recycle
+                secs => Some(Duration::from_secs(secs)),
+            };
+
+        let electrum_rpc_addr: SocketAddr = str_to_socketaddr(
+            m.value_of("electrum_rpc_addr")
+                .unwrap_or(&format!("127.0.0.1:{}", default_electrum_port)),
+            "Electrum RPC",
+        );
+        let electrum_rpc_conn_max_age: Option<Duration> =
+            match value_t_or_exit!(m, "electrum_rpc_conn_max_age", u64) {
+                0 => None, // 0 = unlimited / never disconnect
+                secs => Some(Duration::from_secs(secs)),
+            };
+        let electrum_rpc_write_timeout = match value_t_or_exit!(m, "electrum_rpc_write_timeout", u64) {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        };
+        let electrum_rpc_max_request_num_bytes: usize = match value_t_or_exit!(
+            m,
+            "electrum_rpc_max_request_num_bytes",
+            usize
+        ) {
+            0 => usize::MAX, // 0 = unlimited
+            bytes => bytes,
+        };
+        let electrum_rpc_max_response_num_bytes: usize = match value_or_default_or_exit(
+            &m,
+            "electrum_rpc_max_response_num_bytes",
+            "electrum-rpc-max-response-num-bytes",
+            default_electrum_rpc_max_response_num_bytes,
+        ) {
+            0 => usize::MAX, // 0 = unlimited
+            bytes => bytes,
+        };
+        let electrum_rpc_global_response_budget_bytes: usize = match value_or_default_or_exit(
+            &m,
+            "electrum_rpc_global_response_budget_bytes",
+            "electrum-rpc-global-response-budget-bytes",
+            default_electrum_rpc_global_response_budget_bytes,
+        ) {
+            0 => usize::MAX, // 0 = unlimited
+            bytes => bytes,
+        };
+        if electrum_rpc_global_response_budget_bytes != usize::MAX
+            && electrum_rpc_max_response_num_bytes != usize::MAX
+            && electrum_rpc_global_response_budget_bytes < electrum_rpc_max_response_num_bytes
+        {
+            clap::Error::with_description(
+                &format!(
+                    "--electrum-rpc-global-response-budget-bytes ({}) must be >= \
+                     --electrum-rpc-max-response-num-bytes ({}); a single maximum-size \
+                     reply cannot succeed otherwise",
+                    electrum_rpc_global_response_budget_bytes,
+                    electrum_rpc_max_response_num_bytes,
+                ),
+                clap::ErrorKind::ValueValidation,
+            )
+            .exit();
+        }
+        if electrum_rpc_global_response_budget_bytes != usize::MAX
+            && electrum_rpc_write_timeout.is_none()
+            && electrum_rpc_conn_max_age.is_none()
+        {
+            clap::Error::with_description(
+                "--electrum-rpc-global-response-budget-bytes requires a non-zero \
+                 --electrum-rpc-write-timeout or --electrum-rpc-conn-max-age; otherwise \
+                 clients that stop reading hold their share of the budget until restart",
+                clap::ErrorKind::ValueValidation,
+            )
+            .exit();
+        }
+        let utxos_limit = value_t_or_exit!(m, "utxos_limit", usize);
+        let history_scan_limit = value_t_or_exit!(m, "history_scan_limit", usize);
+        if history_scan_limit == 0 {
+            clap::Error::with_description(
+                "--history-scan-limit must be at least 1",
+                clap::ErrorKind::ValueValidation,
+            )
+            .exit();
+        }
+        let utxos_checkpoint_limit = match m.value_of("utxos_checkpoint_limit") {
+            Some(_) => value_t_or_exit!(m, "utxos_checkpoint_limit", usize),
+            None => utxos_limit.saturating_mul(10),
+        };
+        if utxos_checkpoint_limit < utxos_limit {
+            clap::Error::with_description(
+                &format!(
+                    "--utxos-checkpoint-limit ({}) must be >= --utxos-limit ({})",
+                    utxos_checkpoint_limit, utxos_limit
+                ),
+                clap::ErrorKind::ValueValidation,
+            )
+            .exit();
+        }
+        let http_addr: SocketAddr = str_to_socketaddr(
+            m.value_of("http_addr")
+                .unwrap_or(&format!("127.0.0.1:{}", default_http_port)),
+            "HTTP Server",
+        );
+        let zmq_addr: Option<SocketAddr> = m
+            .value_of("zmq_addr")
+            .map(|e| str_to_socketaddr(e, "ZMQ addr"));
+
+        let http_socket_file: Option<PathBuf> = m.value_of("http_socket_file").map(PathBuf::from);
+        let monitoring_addr: SocketAddr = str_to_socketaddr(
+            m.value_of("monitoring_addr")
+                .unwrap_or(&format!("127.0.0.1:{}", default_monitoring_port)),
+            "Prometheus monitoring",
+        );
+
+        let mut daemon_dir = m
+            .value_of("daemon_dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let mut default_dir = home_dir().expect("no homedir");
+                default_dir.push(".bitcoin");
+                default_dir
+            });
+
+        if let Some(network_subdir) = get_network_subdir(network_type) {
+            daemon_dir.push(network_subdir);
+        }
+        let blocks_dir = m
+            .value_of("blocks_dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| daemon_dir.join("blocks"));
+        let cookie = m
+            .value_of("cookie")
+            .map(|s| SensitiveAuth::new(s.to_owned()));
+
+        let electrum_banner = m.value_of("electrum_banner").map_or_else(
+            || format!("Welcome to electrs-esplora {}", ELECTRS_VERSION),
+            |s| s.into(),
+        );
+
+        #[cfg(feature = "electrum-discovery")]
+        let electrum_public_hosts = m
+            .value_of("electrum_public_hosts")
+            .map(|s| serde_json::from_str(s).expect("invalid --electrum-public-hosts"));
+
+        let mut log = stderrlog::new();
+        // Base verbosity is 2 (Info), each -v flag adds one level:
+        // no flags = Info, -v = Debug, -vv = Trace
+        log.verbosity(2 + m.occurrences_of("verbosity") as usize);
+        log.timestamp(if m.is_present("timestamp") {
+            stderrlog::Timestamp::Millisecond
+        } else {
+            stderrlog::Timestamp::Off
+        });
+        log.init().expect("logging initialization failed");
+
+        let config = Config {
+            log,
+            network_type,
+            db_path,
+            daemon_dir,
+            blocks_dir,
+            daemon_rpc_addr,
+            daemon_rpc_fallback_addr,
+            daemon_parallelism: value_t_or_exit!(m, "daemon_parallelism", usize),
+            daemon_conn_max_age,
+            cookie,
+            utxos_limit,
+            history_scan_limit,
+            utxos_checkpoint_limit,
+            electrum_rpc_addr,
+            electrum_rpc_conn_max_age,
+            electrum_rpc_write_timeout,
+            electrum_rpc_max_request_num_bytes,
+            electrum_rpc_max_response_num_bytes,
+            electrum_rpc_global_response_budget_bytes,
+            electrum_txs_limit: value_t_or_exit!(m, "electrum_txs_limit", usize),
+            electrum_subscription_limit: value_t_or_exit!(m, "electrum_subscription_limit", usize),
+            electrum_checkpoint_proof_concurrency_limit: match m
+                .value_of("electrum_checkpoint_proof_concurrency_limit")
+            {
+                Some(v) => v.parse::<usize>().unwrap_or_else(|_| {
+                    clap::Error::value_validation_auto(format!(
+                        "The argument '{}' isn't a valid value",
+                        v
+                    ))
+                    .exit()
+                }),
+                None => (num_cpus::get() / 2).max(1),
+            },
+            electrum_checkpoint_merkle_cache_mb: value_t_or_exit!(
+                m,
+                "electrum_checkpoint_merkle_cache_mb",
+                usize
+            ),
+            electrum_banner,
+            rpc_logging: {
+                let params = RpcLogging {
+                    enabled: m.is_present("enable_json_rpc_logging"),
+                    hide_params: m.is_present("hide_json_rpc_logging_parameters"),
+                    anonymize_ip: m.is_present("anonymize_json_rpc_logging_source_ip"),
+                };
+                params.validate();
+                params
+            },
+            http_addr,
+            http_socket_file,
+            monitoring_addr,
+            jsonrpc_import: m.is_present("jsonrpc_import"),
+            light_mode: m.is_present("light_mode"),
+            address_search: m.is_present("address_search"),
+            index_unspendables: m.is_present("index_unspendables"),
+            enable_mining_rest: m.is_present("enable_mining_rest"),
+            cors: m.value_of("cors").map(|s| s.to_string()),
+            precache_scripts: m.value_of("precache_scripts").map(|s| s.to_string()),
+            db_block_cache_mb: value_t_or_exit!(m, "db_block_cache_mb", usize),
+            db_parallelism: value_t_or_exit!(m, "db_parallelism", usize),
+            db_write_buffer_size_mb: value_t_or_exit!(m, "db_write_buffer_size_mb", usize),
+            initial_sync_batch_size: value_t_or_exit!(m, "initial_sync_batch_size", usize),
+            db_cache_index_filter_blocks: m.is_present("cache_index_filter_blocks"),
+            zmq_addr,
+
+            #[cfg(feature = "liquid")]
+            parent_network,
+            #[cfg(feature = "liquid")]
+            asset_db_path,
+
+            #[cfg(feature = "electrum-discovery")]
+            electrum_public_hosts,
+            #[cfg(feature = "electrum-discovery")]
+            electrum_announce: m.is_present("electrum_announce"),
+            #[cfg(feature = "electrum-discovery")]
+            tor_proxy: m.value_of("tor_proxy").map(|s| s.parse().unwrap()),
+        };
+        match &config.cookie {
+            Some(auth) => log::debug!("daemon authentication: {:?}", auth),
+            None => log::debug!(
+                "daemon authentication: CookieFile({:?})",
+                config.daemon_dir.join(".cookie")
+            ),
+        }
+        log::debug!("configuration: {:?}", config);
+        config
+    }
+
+    pub fn cookie_getter(&self) -> Arc<dyn CookieGetter> {
+        if let Some(ref value) = self.cookie {
+            Arc::new(StaticCookie {
+                value: value.as_bytes().to_vec(),
+            })
+        } else {
+            Arc::new(CookieFile {
+                daemon_dir: self.daemon_dir.clone(),
+            })
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RpcLogging {
+    pub enabled: bool,
+    pub hide_params: bool,
+    pub anonymize_ip: bool,
+}
+
+impl RpcLogging {
+    pub fn validate(&self) {
+        if !self.enabled && (self.hide_params || self.anonymize_ip) {
+            panic!("Flags '--hide-json-rpc-logging-parameters' or '--anonymize-json-rpc-logging-source-ip' require '--enable-json-rpc-logging'");
+        }
+    }
+}
+
+pub fn get_network_subdir(network: Network) -> Option<&'static str> {
+    match network {
+        #[cfg(not(feature = "liquid"))]
+        Network::Bitcoin => None,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet => Some("testnet3"),
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet4 => Some("testnet4"),
+        #[cfg(not(feature = "liquid"))]
+        Network::Regtest => Some("regtest"),
+        #[cfg(not(feature = "liquid"))]
+        Network::Signet => Some("signet"),
+        // Nusacoin Core uses no network subdirectory for mainnet (like Bitcoin)
+        #[cfg(not(feature = "liquid"))]
+        Network::Nusacoin => None,
+
+        #[cfg(feature = "liquid")]
+        Network::Liquid => Some("liquidv1"),
+        #[cfg(feature = "liquid")]
+        Network::LiquidTestnet => Some("liquidtestnet"),
+        #[cfg(feature = "liquid")]
+        Network::LiquidRegtest => Some("liquidregtest"),
+    }
+}
+
+struct StaticCookie {
+    value: Vec<u8>,
+}
+
+impl CookieGetter for StaticCookie {
+    fn get(&self) -> Result<Vec<u8>> {
+        Ok(self.value.clone())
+    }
+}
+
+struct CookieFile {
+    daemon_dir: PathBuf,
+}
+
+impl CookieGetter for CookieFile {
+    fn get(&self) -> Result<Vec<u8>> {
+        let path = self.daemon_dir.join(".cookie");
+        let contents = fs::read(&path).chain_err(|| {
+            ErrorKind::Connection(format!("failed to read cookie from {:?}", path))
+        })?;
+        Ok(contents)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SensitiveAuth;
+
+    #[test]
+    fn sensitive_auth_debug_redacts_password() {
+        let password = "poc-PASSWORD-123";
+        let auth = SensitiveAuth::new(format!("poc-user:{}", password));
+        let rendered = format!("{:?}", auth);
+
+        assert_eq!(rendered, r#"UserPass("poc-user", "<sensitive>")"#);
+        assert!(!rendered.contains(password));
+    }
+}

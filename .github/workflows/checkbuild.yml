@@ -1,0 +1,56 @@
+name: checkbuild
+
+# Build check for the Nusacoin electrs fork.
+# Verifies the code compiles and the Nusacoin unit tests pass on every
+# push and pull request.
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: cargo check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake
+      - name: Install Rust toolchain
+        # Reads the pinned version from rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
+  unittest:
+    name: cargo test (unit)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Run unit tests (incl. Nusacoin address vectors)
+        run: cargo test --locked --lib
+
+  build:
+    name: cargo build electrs binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - name: Build electrs binary
+        run: cargo build --locked --bin electrs
+      - name: Show CLI help (smoke test)
+        run: ./target/debug/electrs --help | head -20
+      - name: Verify nusacoin network flag
+        run: ./target/debug/electrs --help | grep -i nusacoin
