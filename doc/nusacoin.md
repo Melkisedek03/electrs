@@ -113,7 +113,27 @@ For the Komodo `coins` repo PR you then provide:
 Run at least **two** independent Electrum servers for redundancy before
 submitting the listing PR.
 
-## 6. Operational notes
+## 6. Testnet
+
+For integration testing (wallets, swaps) without touching real funds, run
+against the Nusacoin testnet instead — it's just a flag switch:
+
+```bash
+./target/release/electrs \
+  --network nusacoin-testnet \
+  --daemon-dir ~/.nusacoin \
+  --db-dir /var/lib/electrs-nusacoin-testnet \
+  --electrum-rpc-addr 127.0.0.1:60009
+```
+
+Testnet defaults: daemon RPC `127.0.0.1:18332`, P2P magic `0x0b110907`,
+address encoding P2PKH version 111 / P2SH version 196 / bech32 HRP `"tn"`,
+DB subdirectory `testnet3`. The genesis hash is fetched from the daemon, so
+any testnet chain works. Testnet difficulty is tiny — one
+`generatetoaddress` on a testnet node produces blocks instantly, which makes
+it ideal for end-to-end wallet testing.
+
+## 7. Operational notes
 
 - The Nusacoin chain is sparsely mined (~98 min/block in 2026). Electrum
   clients will see slow confirmations — that is chain behavior, not an

@@ -1619,8 +1619,8 @@ fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpE
     {
         // rust-bitcoin cannot validate Nusacoin addresses (custom prefixes):
         // parse them with the Nusacoin chainparams instead.
-        if network == Network::Nusacoin {
-            let script = nusacoin_address_to_script(addr)
+        if matches!(network, Network::Nusacoin | Network::NusacoinTestnet) {
+            let script = nusacoin_address_to_script(addr, network)
                 .ok_or_else(|| HttpError::from("Invalid Nusacoin address".to_string()))?;
             return Ok(compute_script_hash(&script));
         }

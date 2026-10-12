@@ -43,6 +43,12 @@ pub enum Network {
     /// bech32 HRP "nu").
     #[cfg(not(feature = "liquid"))]
     Nusacoin,
+    /// Nusacoin (NUX) testnet: same fork, testnet chain parameters
+    /// (P2P magic 0x0b110907, P2PKH version 111, P2SH version 196,
+    /// bech32 HRP "tn"). The genesis hash is likewise resolved from the
+    /// connected daemon, so any testnet chain works.
+    #[cfg(not(feature = "liquid"))]
+    NusacoinTestnet,
 
     #[cfg(feature = "liquid")]
     Liquid,
@@ -58,6 +64,8 @@ impl Network {
         match self {
             // Nusacoin mainnet pchMessageStart = 0x4E555341 ("NUSA"), see chainparams.cpp
             Network::Nusacoin => u32::from_le_bytes([0x4E, 0x55, 0x53, 0x41]),
+            // Nusacoin testnet pchMessageStart, see chainparams.cpp (CTestNetParams)
+            Network::NusacoinTestnet => u32::from_le_bytes([0x0b, 0x11, 0x09, 0x07]),
             _ => u32::from_le_bytes(BNetwork::from(self).magic().to_bytes()),
         }
     }
@@ -116,6 +124,7 @@ impl Network {
             "regtest".to_string(),
             "signet".to_string(),
             "nusacoin".to_string(),
+            "nusacoin-testnet".to_string(),
         ];
 
         #[cfg(feature = "liquid")]
@@ -133,7 +142,7 @@ pub fn genesis_hash(network: Network) -> BlockHash {
         // The Nusacoin genesis hash is intentionally not hardcoded: it is
         // resolved from the connected daemon via `Daemon::get_genesis_hash()`,
         // so this fork works with any Nusacoin chain (mainnet/testnet/regtest).
-        Network::Nusacoin => panic!(
+        Network::Nusacoin | Network::NusacoinTestnet => panic!(
             "Nusacoin genesis hash must be resolved from the daemon, see Daemon::get_genesis_hash()"
         ),
         _ => bitcoin_genesis_hash(network.into()),
@@ -199,6 +208,8 @@ impl From<&str> for Network {
             "signet" => Network::Signet,
             #[cfg(not(feature = "liquid"))]
             "nusacoin" => Network::Nusacoin,
+            #[cfg(not(feature = "liquid"))]
+            "nusacoin-testnet" => Network::NusacoinTestnet,
 
             #[cfg(feature = "liquid")]
             "liquid" => Network::Liquid,
@@ -222,9 +233,11 @@ impl From<Network> for BNetwork {
             Network::Regtest => BNetwork::Regtest,
             Network::Signet => BNetwork::Signet,
             // rust-bitcoin has no Nusacoin network parameters. Every conversion
-            // site special-cases Network::Nusacoin before reaching here
+            // site special-cases the Nusacoin networks before reaching here
             // (see Network::magic and genesis_hash), so this arm is unreachable.
-            Network::Nusacoin => panic!("rust-bitcoin has no Nusacoin network parameters"),
+            Network::Nusacoin | Network::NusacoinTestnet => {
+                panic!("rust-bitcoin has no Nusacoin network parameters")
+            }
         }
     }
 }

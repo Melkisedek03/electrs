@@ -1256,7 +1256,7 @@ impl RPC {
             // Nusacoin's genesis hash is not hardcoded in rust-bitcoin:
             // resolve it from the connected daemon instead.
             let genesis_hash = match config.network_type {
-                Network::Nusacoin => query
+                Network::Nusacoin | Network::NusacoinTestnet => query
                     .daemon()
                     .get_genesis_hash()
                     .expect("failed to fetch Nusacoin genesis hash from daemon"),

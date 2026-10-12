@@ -29,7 +29,9 @@ impl ScriptToAddr for bitcoin::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
         match network {
             // rust-bitcoin only knows Bitcoin's address prefixes.
-            Network::Nusacoin => nusacoin_script_to_address(self),
+            Network::Nusacoin | Network::NusacoinTestnet => {
+                nusacoin_script_to_address(self, network)
+            }
             _ => bitcoin::Address::from_script(self, bitcoin::Network::from(network))
                 .map(|s| s.to_string())
                 .ok(),
@@ -37,25 +39,52 @@ impl ScriptToAddr for bitcoin::Script {
     }
 }
 
-/// Nusacoin (NUX) address encoding, following the Nusacoin chainparams
-/// (see `src/kernel/chainparams.cpp` in the Nusacoin Core repo):
-/// P2PKH version byte 0x35, P2SH version byte 0x4b, bech32 HRP "nu".
+/// Nusacoin (NUX) address parameters, following the Nusacoin chainparams
+/// (see `src/chainparams.cpp` in the Nusacoin Core repo).
 #[cfg(not(feature = "liquid"))]
-fn nusacoin_script_to_address(script: &bitcoin::Script) -> Option<String> {
+struct NusacoinAddressParams {
+    p2pkh_version: u8,
+    p2sh_version: u8,
+    bech32_hrp: &'static str,
+}
+
+#[cfg(not(feature = "liquid"))]
+fn nusacoin_address_params(network: Network) -> NusacoinAddressParams {
+    match network {
+        // mainnet: P2PKH version byte 0x35, P2SH version byte 0x4b, bech32 HRP "nu"
+        Network::Nusacoin => NusacoinAddressParams {
+            p2pkh_version: 0x35,
+            p2sh_version: 0x4b,
+            bech32_hrp: "nu",
+        },
+        // testnet: P2PKH version byte 111, P2SH version byte 196, bech32 HRP "tn"
+        Network::NusacoinTestnet => NusacoinAddressParams {
+            p2pkh_version: 111,
+            p2sh_version: 196,
+            bech32_hrp: "tn",
+        },
+        _ => panic!("not a Nusacoin network: {:?}", network),
+    }
+}
+
+/// Nusacoin (NUX) address encoding, following the Nusacoin chainparams.
+#[cfg(not(feature = "liquid"))]
+fn nusacoin_script_to_address(script: &bitcoin::Script, network: Network) -> Option<String> {
     use bitcoin::bech32::{segwit, Fe32, Hrp};
     use std::convert::TryFrom;
 
+    let params = nusacoin_address_params(network);
     let bytes = script.as_bytes();
     if script.is_p2pkh() {
         // OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG
         let mut payload = Vec::with_capacity(21);
-        payload.push(0x35u8);
+        payload.push(params.p2pkh_version);
         payload.extend_from_slice(&bytes[3..23]);
         Some(bitcoin::base58::encode_check(&payload))
     } else if script.is_p2sh() {
         // OP_HASH160 <20 bytes> OP_EQUAL
         let mut payload = Vec::with_capacity(21);
-        payload.push(0x4bu8);
+        payload.push(params.p2sh_version);
         payload.extend_from_slice(&bytes[2..22]);
         Some(bitcoin::base58::encode_check(&payload))
     } else if script.is_witness_program() {
@@ -66,7 +95,7 @@ fn nusacoin_script_to_address(script: &bitcoin::Script) -> Option<String> {
             _ => return None,
         };
         let program = &bytes[2..];
-        let hrp = Hrp::parse("nu").ok()?;
+        let hrp = Hrp::parse(params.bech32_hrp).ok()?;
         let fe_version = Fe32::try_from(version).ok()?;
         // segwit::encode picks Bech32 (v0) vs Bech32m (v1+) automatically.
         segwit::encode(hrp, fe_version, program).ok()
@@ -75,35 +104,34 @@ fn nusacoin_script_to_address(script: &bitcoin::Script) -> Option<String> {
     }
 }
 /// Parse a Nusacoin (NUX) address string into its scriptPubKey.
-/// Inverse of `nusacoin_script_to_address`: accepts base58check with version
-/// bytes 0x35 (P2PKH) / 0x4b (P2SH) and bech32/bech32m with HRP "nu".
+/// Inverse of `nusacoin_script_to_address`: accepts base58check with the
+/// network's version bytes (P2PKH/P2SH) and bech32/bech32m with the
+/// network's HRP.
 #[cfg(not(feature = "liquid"))]
-pub fn nusacoin_address_to_script(addr: &str) -> Option<Script> {
+pub fn nusacoin_address_to_script(addr: &str, network: Network) -> Option<Script> {
     use bitcoin::bech32::{segwit, Hrp};
     use bitcoin::hashes::Hash;
     use std::convert::TryFrom;
 
+    let params = nusacoin_address_params(network);
     // Try base58check first.
     if let Ok(data) = bitcoin::base58::decode_check(addr) {
         if data.len() == 21 {
             let hash = <[u8; 20]>::try_from(&data[1..21]).ok()?;
-            match data[0] {
-                0x35 => {
-                    let hash = bitcoin::PubkeyHash::from_byte_array(hash);
-                    return Some(Script::new_p2pkh(&hash));
-                }
-                0x4b => {
-                    let hash = bitcoin::ScriptHash::from_byte_array(hash);
-                    return Some(Script::new_p2sh(&hash));
-                }
-                _ => return None,
+            if data[0] == params.p2pkh_version {
+                let hash = bitcoin::PubkeyHash::from_byte_array(hash);
+                return Some(Script::new_p2pkh(&hash));
+            }
+            if data[0] == params.p2sh_version {
+                let hash = bitcoin::ScriptHash::from_byte_array(hash);
+                return Some(Script::new_p2sh(&hash));
             }
         }
         return None;
     }
-    // Try bech32/bech32m with HRP "nu".
+    // Try bech32/bech32m with the network's HRP.
     let (hrp, version, program) = segwit::decode(addr).ok()?;
-    if hrp != Hrp::parse("nu").ok()? {
+    if hrp != Hrp::parse(params.bech32_hrp).ok()? {
         return None;
     }
     let version = bitcoin::WitnessVersion::try_from(version.to_u8()).ok()?;
@@ -246,14 +274,85 @@ mod tests {
             // encode
             assert_eq!(script.to_address_str(Network::Nusacoin).as_deref(), Some(addr));
             // parse back
-            let parsed = nusacoin_address_to_script(addr).expect("address must parse");
+            let parsed =
+                nusacoin_address_to_script(addr, Network::Nusacoin).expect("address must parse");
             assert_eq!(parsed, script, "roundtrip failed for {}", addr);
         }
         // Wrong-network addresses must be rejected.
-        assert_eq!(nusacoin_address_to_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"), None); // Bitcoin P2PKH
         assert_eq!(
-            nusacoin_address_to_script("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            nusacoin_address_to_script("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", Network::Nusacoin),
+            None
+        ); // Bitcoin P2PKH
+        assert_eq!(
+            nusacoin_address_to_script(
+                "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+                Network::Nusacoin
+            ),
             None
         ); // Bitcoin bech32
+        // Mainnet addresses must be rejected on testnet and vice versa.
+        assert_eq!(
+            nusacoin_address_to_script(
+                "NKvKiDevJSHSuQRzNso6nsNyMHyHGE87Uf",
+                Network::NusacoinTestnet
+            ),
+            None
+        );
+        assert_eq!(
+            nusacoin_address_to_script(
+                "nu1qqqgjyv6y24n80zye42aueh0wluqpzg3n3f9x3k",
+                Network::NusacoinTestnet
+            ),
+            None
+        );
+    }
+
+    /// Testnet vectors cross-checked against an independent Python implementation
+    /// (base58check + BIP-173/350) of the Nusacoin testnet chainparams
+    /// (P2PKH version 111, P2SH version 196, bech32 HRP "tn").
+    #[test]
+    fn nusacoin_testnet_address_encoding() {
+        let h160 = "00112233445566778899aabbccddeeff00112233";
+        let p32 = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+        let cases = [
+            // P2PKH (version byte 111)
+            (
+                format!("76a914{}88ac", h160),
+                "mfXJpWwdUuAGLYX1oD7av9AbrYuzUZSGHb",
+            ),
+            // P2SH (version byte 196)
+            (
+                format!("a914{}87", h160),
+                "2MsFaWkH7qEYjrPNNssRg8oJUMRpAs4D6Ps",
+            ),
+            // P2WPKH (bech32, HRP "tn")
+            (
+                format!("0014{}", h160),
+                "tn1qqqgjyv6y24n80zye42aueh0wluqpzg3naadcum",
+            ),
+            // P2WSH (bech32, HRP "tn")
+            (
+                format!("0020{}", p32),
+                "tn1qqqgjyv6y24n80zye42aueh0wluqpzg3ng32kvaugnx4thnxaamlstnghvq",
+            ),
+            // P2TR (bech32m, HRP "tn")
+            (
+                format!("5120{}", p32),
+                "tn1pqqgjyv6y24n80zye42aueh0wluqpzg3ng32kvaugnx4thnxaamlspyg75u",
+            ),
+        ];
+        for (script_hex, addr) in cases {
+            let script = hex_script(&script_hex);
+            // encode
+            assert_eq!(
+                script.to_address_str(Network::NusacoinTestnet).as_deref(),
+                Some(addr)
+            );
+            // parse back
+            let parsed = nusacoin_address_to_script(addr, Network::NusacoinTestnet)
+                .expect("address must parse");
+            assert_eq!(parsed, script, "roundtrip failed for {}", addr);
+        }
     }
 }

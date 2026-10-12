@@ -488,6 +488,9 @@ impl Config {
             // Nusacoin Core mainnet RPC port, see chainparamsbase.cpp
             #[cfg(not(feature = "liquid"))]
             Network::Nusacoin => 28832,
+            // Nusacoin Core testnet RPC port, see chainparamsbase.cpp
+            #[cfg(not(feature = "liquid"))]
+            Network::NusacoinTestnet => 18332,
 
             #[cfg(feature = "liquid")]
             Network::Liquid => 7041,
@@ -507,6 +510,8 @@ impl Config {
             Network::Signet => 60601,
             #[cfg(not(feature = "liquid"))]
             Network::Nusacoin => 50009,
+            #[cfg(not(feature = "liquid"))]
+            Network::NusacoinTestnet => 60009,
 
             #[cfg(feature = "liquid")]
             Network::Liquid => 51000,
@@ -534,6 +539,8 @@ impl Config {
             Network::Signet => 3003,
             #[cfg(not(feature = "liquid"))]
             Network::Nusacoin => 3010,
+            #[cfg(not(feature = "liquid"))]
+            Network::NusacoinTestnet => 3011,
 
             #[cfg(feature = "liquid")]
             Network::Liquid => 3000,
@@ -555,6 +562,8 @@ impl Config {
             Network::Signet => 54224,
             #[cfg(not(feature = "liquid"))]
             Network::Nusacoin => 4225,
+            #[cfg(not(feature = "liquid"))]
+            Network::NusacoinTestnet => 14225,
 
             #[cfg(feature = "liquid")]
             Network::Liquid => 34224,
@@ -859,6 +868,9 @@ pub fn get_network_subdir(network: Network) -> Option<&'static str> {
         // Nusacoin Core uses no network subdirectory for mainnet (like Bitcoin)
         #[cfg(not(feature = "liquid"))]
         Network::Nusacoin => None,
+        // ... but testnet lives in "testnet3", like Bitcoin
+        #[cfg(not(feature = "liquid"))]
+        Network::NusacoinTestnet => Some("testnet3"),
 
         #[cfg(feature = "liquid")]
         Network::Liquid => Some("liquidv1"),
