@@ -19,8 +19,10 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake
       - name: Install Rust toolchain
-        # Reads the pinned version from rust-toolchain.toml
+        # Pinned to rust-toolchain.toml (see `with:` below)
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0 # pinned, keep in sync with rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
       - name: Check all targets
         run: cargo check --locked --all-targets
@@ -34,6 +36,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0 # pinned, keep in sync with rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
       - name: Run unit tests (incl. Nusacoin address vectors)
         run: cargo test --locked --lib
@@ -47,6 +51,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0 # pinned, keep in sync with rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
       - name: Build electrs binary
         run: cargo build --locked --bin electrs
