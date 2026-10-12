@@ -1,14 +1,15 @@
-# Panduan Instalasi electrs untuk Nusacoin di VPS
+# Panduan Instalasi electrs untuk Nusacoin di VPS (Versi Binary)
 
 Panduan langkah demi langkah memasang **electrs** (Electrum server) untuk
-blockchain **Nusacoin (NUX)** di VPS Ubuntu. Electrum server ini adalah
-prasyarat agar NUX bisa listing di DEX atomic-swap seperti Komodo Wallet.
+blockchain **Nusacoin (NUX)** di VPS Ubuntu — **tanpa compile**, langsung
+pakai binary resmi. electrs adalah backend untuk wallet Electrum-protocol
+(seperti GreenWallet) dan prasyarat listing DEX atomic-swap seperti Komodo
+Wallet.
 
-> Estimasi waktu: ±30 menit (di luar sync `nusacoind` dan compile awal).
+> Estimasi waktu: ±20 menit (di luar sync `nusacoind`).
+> Panduan ini sudah dipraktikkan langsung (proven) di VPS produksi.
 
-## 1. Siapkan VPS
-
-Spesifikasi minimal (chain Nusacoin masih kecil, ±73 ribu block):
+## 1. Spesifikasi VPS
 
 | Komponen | Minimal |
 |----------|---------|
@@ -17,20 +18,21 @@ Spesifikasi minimal (chain Nusacoin masih kecil, ±73 ribu block):
 | RAM      | 2 GB |
 | Disk     | 30 GB SSD |
 
-> Catatan: `nusacoind` + `electrs` untuk chain sekecil Nusacoin muat di VPS
-> $5–10/bulan. Yang penting bukan speknya, tapi VPS-nya **tetap online**.
+Chain Nusacoin masih kecil (±73 ribu block, 2026): electrs hanya memakai
+±60 MB RAM saat idle dan index ±137 MB di disk. Nyaman di VPS $5–10/bulan.
+Yang penting VPS-nya **tetap online**.
 
-## 2. Install `nusacoind` dan tunggu sync
+## 2. Siapkan `nusacoind` dan tunggu sync
 
-electrs membutuhkan `nusacoind` yang sudah sync penuh (semua block tersimpan,
-*pruning* mati). `txindex` **tidak** wajib — electrs membangun index sendiri.
+electrs membutuhkan `nusacoind` yang sudah sync penuh (`verificationprogress:
+1.0`, *pruning* mati). `txindex` **tidak** wajib — electrs membangun index
+sendiri.
 
 ```bash
-# contoh: jalankan nusacoind sebagai user 'nusacoin'
 sudo useradd -m -s /bin/bash nusacoin
 ```
 
-Isi `~nusacoin/.nusacoin/nusacoin.conf`:
+Isi `/home/nusacoin/.nusacoin/nusacoin.conf`:
 
 ```ini
 server=1
@@ -42,41 +44,40 @@ rpcuser=nusacoinrpc
 rpcpassword=GANTI_DENGAN_PASSWORD_ACAK_YANG_KUAT
 ```
 
-Jalankan dan tunggu sampai sync selesai:
+Jalankan dan tunggu sync selesai:
 
 ```bash
-nusacoind -datadir=/home/nusacoin/.nusacoin -daemon
-# cek progres:
-nusacoin-cli -datadir=/home/nusacoin/.nusacoin getblockchaininfo
+sudo -u nusacoin nusacoind -datadir=/home/nusacoin/.nusacoin -daemon
+sudo -u nusacoin nusacoin-cli -datadir=/home/nusacoin/.nusacoin getblockchaininfo
 # "verificationprogress" harus 1.0 sebelum lanjut
 ```
 
-> **Penting:** port RPC (28832) jangan dibuka ke internet. Biarkan hanya
-> `127.0.0.1`.
+> **Penting:** port RPC jangan dibuka ke internet. Biarkan hanya `127.0.0.1`.
 
-## 3. Install peralatan build
+## 3. Download binary electrs
 
-```bash
-sudo apt-get update
-sudo apt-get install -y git curl build-essential libclang-dev clang cmake
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-```
-
-## 4. Download dan compile electrs
+Download artifact `electrs-nusacoin-linux-x86_64` dari
+[halaman GitHub Actions](https://github.com/Melkisedek03/electrs/actions)
+(pilih run terbaru yang hijau). Lalu verifikasi checksum-nya — **jangan
+lewatkan langkah ini**:
 
 ```bash
-git clone https://github.com/Melkisedek03/electrs.git
-cd electrs
-cargo build --release --bin electrs
-# binary hasil: ./target/release/electrs
-# (compile pertama ±15–30 menit, sesudahnya cepat karena cache)
-sudo cp ./target/release/electrs /usr/local/bin/
+cd /tmp
+# (sesuaikan dengan file yang di-download)
+sha256sum electrs-nusacoin-linux-x86_64
+# cocokkan dengan checksum yang dipublikasikan di halaman rilis/CI
 ```
 
-## 5. Jalankan electrs
+Pasang binary-nya:
 
-Buat direktori database dan user khusus:
+```bash
+sudo cp electrs-nusacoin-linux-x86_64 /usr/local/bin/electrs
+sudo chmod +x /usr/local/bin/electrs
+/usr/local/bin/electrs --version
+# harus menampilkan: Electrum Rust Server 0.4.1
+```
+
+## 4. Buat user dan direktori database
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin electrs
@@ -84,28 +85,30 @@ sudo mkdir -p /var/lib/electrs-nusacoin
 sudo chown electrs:electrs /var/lib/electrs-nusacoin
 ```
 
-Tes jalan manual dulu (ganti `rpcuser`/`rpcpassword` sesuai `nusacoin.conf`):
+## 5. Beri user `electrs` akses baca ke block daemon
+
+electrs membaca file block mentah (`blk*.dat`) langsung dari datadir daemon.
+Karena service berjalan sebagai user `electrs` (bukan root), beri izin baca
+via ACL:
 
 ```bash
-sudo -u electrs /usr/local/bin/electrs \
-  --network nusacoin \
-  --daemon-dir /home/nusacoin/.nusacoin \
-  --daemon-rpc-addr 127.0.0.1:28832 \
-  --db-dir /var/lib/electrs-nusacoin \
-  --electrum-rpc-addr 127.0.0.1:50009
+sudo apt-get update && sudo apt-get install -y acl
+sudo setfacl -m u:electrs:--x /home/nusacoin /home/nusacoin/.nusacoin
+sudo setfacl -Rm u:electrs:rX /home/nusacoin/.nusacoin/blocks
+sudo setfacl -Rdm u:electrs:rX /home/nusacoin/.nusacoin/blocks
 ```
 
-Saat pertama jalan, electrs mengambil genesis hash dari daemon lalu
-meng-index seluruh block (chain sekecil Nusacoin: hitungan menit). Tes:
+Verifikasi:
 
 ```bash
-echo '{"id":1,"method":"server.version","params":[]}' | nc 127.0.0.1 50009
+sudo -u electrs ls /home/nusacoin/.nusacoin/blocks/blk*.dat | head -3
+# harus menampilkan daftar file blk*.dat, bukan "Permission denied"
 ```
 
-Kalau ada jawaban JSON, index berjalan. Hentikan dengan `Ctrl+C`, lalu
-pasang sebagai service agar otomatis jalan.
+> Baris `setfacl -Rdm` (default ACL) memastikan file `blk*.dat` **baru**
+> yang dibuat daemon nanti otomatis bisa dibaca.
 
-### Service systemd
+## 6. Pasang sebagai service systemd
 
 `/etc/systemd/system/electrs-nusacoin.service`:
 
@@ -113,7 +116,6 @@ pasang sebagai service agar otomatis jalan.
 [Unit]
 Description=electrs Electrum server untuk Nusacoin
 After=network.target
-Wants=nusacoind.service
 
 [Service]
 User=electrs
@@ -121,8 +123,10 @@ ExecStart=/usr/local/bin/electrs \
   --network nusacoin \
   --daemon-dir /home/nusacoin/.nusacoin \
   --daemon-rpc-addr 127.0.0.1:28832 \
+  --cookie "nusacoinrpc:GANTI_DENGAN_PASSWORD_ACAK_YANG_KUAT" \
   --db-dir /var/lib/electrs-nusacoin \
-  --electrum-rpc-addr 127.0.0.1:50009
+  --electrum-rpc-addr 127.0.0.1:50009 \
+  --http-addr 127.0.0.1:3010
 Restart=on-failure
 RestartSec=30
 LimitNOFILE=100000
@@ -131,22 +135,103 @@ LimitNOFILE=100000
 WantedBy=multi-user.target
 ```
 
+Catatan parameter penting:
+
+- `--daemon-dir` **wajib** — tanpa ini electrs mencari block di direktori
+  yang salah dan index gagal total.
+- `--cookie` diisi `rpcuser:rpcpassword` sesuai `nusacoin.conf`.
+- `--daemon-rpc-addr` sesuaikan dengan port RPC daemon (default Nusacoin:
+  `28832`; kalau `nusacoin.conf` memakai port lain, samakan).
+- `--http-addr` adalah REST API (kompatibel Esplora). Biarkan `127.0.0.1`
+  kecuali tahu yang dilakukan (lihat bagian 9).
+
+Aktifkan:
+
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now electrs-nusacoin
-sudo systemctl status electrs-nusacoin
-sudo journalctl -u electrs-nusacoin -f   # lihat log
+sudo systemctl enable --now electrs-nusacoin.service
 ```
 
-## 6. Buka akses publik (untuk listing Komodo)
+## 7. Pantau indexing awal
 
-Wallet/client DEX butuh server Electrum yang bisa diakses publik, biasanya
-port `50001` (TCP) dan `50002` (SSL). electrs sendiri hanya bicara TCP polos,
-jadi pasang `stunnel` untuk TLS-nya:
+```bash
+sudo journalctl -u electrs-nusacoin.service -f
+# keluar dengan tombol 'q'
+```
+
+Log yang sehat:
+
+```
+INFO downloading all block headers up to ...
+INFO hash=... height=73637 ... (73638 left to index)
+INFO initial sync complete, tip at ...
+INFO Electrum RPC server running on 127.0.0.1:50009
+INFO REST server running on 127.0.0.1:3010
+```
+
+Indexing 73 ribu block hanya butuh hitungan menit di chain sekecil Nusacoin.
+Tunggu sampai muncul `initial sync complete`.
+
+## 8. Verifikasi
+
+**Electrum RPC** (port `50009`):
+
+```bash
+python3 -c "
+import socket
+s = socket.create_connection(('127.0.0.1', 50009), timeout=10)
+s.sendall(b'{\"id\":1,\"method\":\"server.version\",\"params\":[\"smoketest\",\"1.4\"]}\n')
+print(s.recv(4096).decode())
+"
+# harus balik JSON: {"id":1,"jsonrpc":"2.0","result":["electrs-esplora 0.4.1","1.4"]}
+```
+
+**REST API** (port `3010`, kompatibel Esplora):
+
+```bash
+curl -s http://127.0.0.1:3010/blocks/tip/height
+# harus balik tinggi block, mis. 73637
+```
+
+Endpoint berguna lainnya:
+
+| Endpoint | Kegunaan |
+|----------|----------|
+| `GET /blocks/tip/hash` | hash block terakhir |
+| `GET /block/:hash` | detail block |
+| `GET /address/:address/utxo` | daftar UTXO sebuah address |
+| `GET /address/:address/txs` | riwayat transaksi address |
+| `GET /tx/:txid` | detail transaksi |
+| `GET /mempool/txids` | transaksi di mempool |
+| `POST /tx` | broadcast raw transaction (body = hex) |
+
+Untuk akses REST dari komputer sendiri (mis. via Bruno/Postman), buat SSH
+tunnel — jangan buka port ke publik tanpa firewall:
+
+```bash
+ssh -f -N -L 3010:127.0.0.1:3010 <user>@<ip-vps>
+# lalu akses http://localhost:3010 dari komputer sendiri
+```
+
+## 9. Troubleshooting
+
+| Gejala di log | Penyebab & solusi |
+|---------------|-------------------|
+| `bitcoind returned non-contiguous headers` | Binary lama (sebelum dukungan X11). Download ulang binary terbaru. |
+| `failed to index N blocks from blk*.dat files` | `--daemon-dir` salah atau tidak diset — electrs tidak menemukan file block. Perbaiki di service file. |
+| `failed to read daemon xor.dat file: Permission denied` | User `electrs` tidak bisa baca datadir daemon. Ulangi langkah 5 (ACL). |
+| Service restart terus-menerus | Lihat `journalctl -u electrs-nusacoin.service -n 50 --no-pager` dan cocokkan dengan tabel ini. |
+
+**Index ulang dari nol:** hentikan service, hapus isi `--db-dir`, jalankan
+lagi — electrs akan index ulang dari genesis.
+
+## 10. Buka akses publik (untuk listing Komodo)
+
+Wallet/client DEX butuh server Electrum yang bisa diakses publik. electrs
+hanya bicara TCP polos — untuk TLS pasang `stunnel`:
 
 ```bash
 sudo apt-get install -y stunnel4 certbot
-# dapatkan sertifikat (ganti domainnya):
 sudo certbot certonly --standalone -d electrum1.contoh.com
 ```
 
@@ -163,9 +248,8 @@ key = /etc/letsencrypt/live/electrum1.contoh.com/privkey.pem
 Buka port di firewall, **tetap tutup port RPC daemon**:
 
 ```bash
-sudo ufw allow 50001/tcp
 sudo ufw allow 50002/tcp
-# JANGAN buka 28832 ke publik!
+# JANGAN buka port RPC daemon ke publik!
 ```
 
 Untuk pengajuan listing ke Komodo (`KomodoPlatform/coins`), sediakan minimal
@@ -174,21 +258,19 @@ Untuk pengajuan listing ke Komodo (`KomodoPlatform/coins`), sediakan minimal
 - `electrums/NUX` — daftar server + port
 - `explorers/NUX` — URL block explorer
 - `coins` — entri coin + `icons/nux.png` (82x82)
-- `swaps/NUX` — link explorer ke 4 transaksi atomic-swap hasil uji coba
-  (`makerpayment`, `takerpayment`, `takerpaymentspent`, `makerpaymentspent`)
-  via Komodo DeFi Framework API
+- bukti atomic-swap via Komodo DeFi Framework API
 
-## 7. Catatan operasional
+## 11. Catatan operasional
 
 - **Chain Nusacoin jarang ada block** (±98 menit/block di 2026). Client akan
   melihat konfirmasi lambat — itu perilaku chain, bukan masalah indexer.
   Atur timelock swap secara konservatif.
-- **Index ulang dari nol:** hentikan service, hapus isi `--db-dir`, jalankan
-  lagi — electrs akan index ulang dari genesis daemon.
+- **Update binary:** download binary baru, verifikasi checksum, timpa
+  `/usr/local/bin/electrs`, lalu `sudo systemctl restart electrs-nusacoin`.
 - **Monitoring:** endpoint Prometheus di `--monitoring-addr`
   (default `127.0.0.1:4225` untuk `--network nusacoin`).
-- **Update:** `cd electrs && git pull && cargo build --release --bin electrs`,
-  lalu `sudo systemctl restart electrs-nusacoin`.
+- **Untuk developer** yang ingin compile dari source:
+  `cargo build --locked --release --bin electrs` (butuh Rust toolchain).
 
 ## Bantuan
 
