@@ -1052,6 +1052,10 @@ impl Daemon {
         self.network.magic()
     }
 
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
     #[trace]
     fn call_jsonrpc_on_connection(
         &self,
@@ -1309,7 +1313,7 @@ impl Daemon {
     pub fn getblock(&self, blockhash: &BlockHash) -> Result<Block> {
         let block =
             block_from_value(self.request("getblock", json!([blockhash, /*verbose=*/ false]))?)?;
-        let returned = block.block_hash();
+        let returned = crate::chain::block_hash(self.network, &block.header);
         if returned != *blockhash {
             bail!(
                 "bitcoind returned wrong block for getblock requested_hash='{}' returned_hash='{}'",
@@ -1372,7 +1376,7 @@ impl Daemon {
         let mut blocks = Vec::with_capacity(values.len());
         for (value, requested) in values.into_iter().zip(blockhashes.iter()) {
             let block = block_from_value(value)?;
-            let returned = block.block_hash();
+            let returned = crate::chain::block_hash(self.network, &block.header);
             if returned != *requested {
                 bail!(
                     "bitcoind returned wrong block for getblocks requested_hash='{}' returned_hash='{}'",
@@ -1580,7 +1584,7 @@ impl Daemon {
                     header.prev_blockhash
                 );
             }
-            blockhash = header.block_hash();
+            blockhash = crate::chain::block_hash(self.network, header);
         }
         if blockhash != *tip {
             bail!(

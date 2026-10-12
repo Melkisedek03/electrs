@@ -157,6 +157,7 @@ fn blkfiles_fetcher(
     new_headers: Vec<HeaderEntry>,
 ) -> Result<Fetcher<Vec<BlockEntry>>> {
     let magic = daemon.magic();
+    let network = daemon.network();
     let blk_files = daemon.list_blk_files()?;
     let xor_key = daemon.read_blk_file_xor_key()?;
 
@@ -184,7 +185,7 @@ fn blkfiles_fetcher(
                             block_count,
                             (index/block_count) as f32/100.0
                         );
-                        let blockhash = block.block_hash();
+                        let blockhash = crate::chain::block_hash(network, &block.header);
                         entry_map
                             .remove(&blockhash)
                             .map(|entry| {

@@ -1,4 +1,4 @@
-use crate::chain::{BlockHash, BlockHeader};
+use crate::chain::{BlockHash, BlockHeader, Network};
 use crate::errors::*;
 use crate::new_index::BlockEntry;
 
@@ -98,6 +98,7 @@ impl HeaderList {
     pub fn new(
         mut headers_map: HashMap<BlockHash, BlockHeader>,
         tip_hash: BlockHash,
+        network: Network,
     ) -> HeaderList {
         trace!(
             "processing {} headers, tip at {:?}",
@@ -113,7 +114,9 @@ impl HeaderList {
                 panic!(
                     "missing expected blockhash in headers map: {:?}, pointed from: {:?}",
                     blockhash,
-                    headers_chain.last().map(|h| h.block_hash())
+                    headers_chain
+                        .last()
+                        .map(|h| crate::chain::block_hash(network, h))
                 )
             });
             blockhash = header.prev_blockhash;
@@ -128,7 +131,7 @@ impl HeaderList {
         );
 
         let mut headers = HeaderList::empty();
-        headers.append(headers.preprocess(headers_chain, &tip_hash).0);
+        headers.append(headers.preprocess(headers_chain, &tip_hash, network).0);
         headers
     }
 
@@ -142,12 +145,13 @@ impl HeaderList {
         &self,
         new_headers: Vec<BlockHeader>,
         new_tip: &BlockHash,
+        network: Network,
     ) -> (Vec<HeaderEntry>, Option<usize>) {
         // header[i] -> header[i-1] (i.e. header.last() is the tip)
         let (new_height, header_entries) = if !new_headers.is_empty() {
             let hashed_headers = new_headers
                 .into_iter()
-                .map(|h| (h.block_hash(), h))
+                .map(|h| (crate::chain::block_hash(network, &h), h))
                 .collect::<Vec<_>>();
             for ((curr_blockhash, _), (_, next_header)) in hashed_headers.iter().tuple_windows() {
                 assert_eq!(*curr_blockhash, next_header.prev_blockhash);

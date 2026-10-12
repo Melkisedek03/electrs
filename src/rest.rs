@@ -98,7 +98,9 @@ impl BlockValue {
     fn new(blockhm: BlockHeaderMeta) -> Self {
         let header = blockhm.header_entry.header();
         BlockValue {
-            id: header.block_hash(),
+            // Use the stored header hash: on Nusacoin networks it is the X11
+            // hash (see chain::block_hash), not rust-bitcoin's SHA256d.
+            id: *blockhm.header_entry.hash(),
             height: blockhm.header_entry.height() as u32,
             #[cfg(not(feature = "liquid"))]
             version: header.version.to_consensus() as u32,
@@ -1213,9 +1215,9 @@ fn handle_blocking_request(
                 HttpError::not_found("Transaction not found or is unconfirmed".to_string())
             })?;
 
-            let height = query
-                .chain()
-                .height_by_hash(&merkleblock.header.block_hash());
+            let height = query.chain().height_by_hash(
+                &crate::chain::block_hash(config.network_type, &merkleblock.header),
+            );
 
             http_message(
                 StatusCode::OK,

@@ -16,6 +16,8 @@ pub use {
 };
 
 use bitcoin::blockdata::constants::genesis_block;
+#[cfg(not(feature = "liquid"))]
+use bitcoin::hashes::Hash;
 pub use bitcoin::network::Network as BNetwork;
 
 #[cfg(not(feature = "liquid"))]
@@ -151,6 +153,33 @@ pub fn genesis_hash(network: Network) -> BlockHash {
     return liquid_genesis_hash(network);
 }
 
+/// Compute the block hash of a header for the given network.
+///
+/// Nusacoin identifies blocks by their X11 hash (its `GetHash()` is wired to
+/// `HashX11`), not by Bitcoin's double-SHA256. Every other network keeps
+/// rust-bitcoin's default SHA256d block hash.
+#[cfg_attr(feature = "liquid", allow(unused_variables))]
+pub fn block_hash(network: Network, header: &BlockHeader) -> BlockHash {
+    #[cfg(not(feature = "liquid"))]
+    return match network {
+        Network::Nusacoin | Network::NusacoinTestnet => x11_block_hash(header),
+        _ => header.block_hash(),
+    };
+    #[cfg(feature = "liquid")]
+    return header.block_hash();
+}
+
+/// X11 block hash, matching the daemon's `GetHash()` on Nusacoin networks.
+/// `rs_x11_hash` returns the digest in internal (little-endian) byte order,
+/// which is exactly what `BlockHash::from_byte_array` expects, so no
+/// byte-swapping is needed for the display format to match `getblockhash`.
+#[cfg(not(feature = "liquid"))]
+fn x11_block_hash(header: &BlockHeader) -> BlockHash {
+    use bitcoin::consensus::encode::serialize;
+    let digest = rs_x11_hash::get_x11_hash(serialize(header));
+    BlockHash::from_byte_array(digest)
+}
+
 pub fn bitcoin_genesis_hash(network: BNetwork) -> bitcoin::BlockHash {
     lazy_static! {
         static ref BITCOIN_GENESIS: bitcoin::BlockHash =
@@ -252,5 +281,59 @@ impl From<BNetwork> for Network {
             BNetwork::Regtest => Network::Regtest,
             BNetwork::Signet => Network::Signet,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex_to_bytes(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The Nusacoin daemon identifies blocks by their X11 hash, not SHA256d.
+    /// This pins `block_hash()` to a real mainnet vector: the genesis header
+    /// (from `getblockheader <genesis> false` on the live daemon) must hash
+    /// to the daemon's `getblockhash 0`.
+    ///
+    /// Regression test for the "bitcoind returned non-contiguous headers"
+    /// failure: with SHA256d the same header hashes to
+    /// `fdad7256daf7e620a5adcf97ea6d154be219123c9723dd818b6610432e501892`,
+    /// which matches nothing the daemon knows.
+    #[test]
+    #[cfg(not(feature = "liquid"))]
+    fn nusacoin_block_hash_is_x11() {
+        let raw = hex_to_bytes(
+            "0100000000000000000000000000000000000000000000000000000000000000000000009bfd61aa387643ae280ad4d29bceb017541657fd213d0ef2df59d2a7ddda0e666fdb2c69f0ff0f1e4ea7be01",
+        );
+        let header: BlockHeader = deserialize(&raw).unwrap();
+        assert_eq!(
+            block_hash(Network::Nusacoin, &header).to_string(),
+            "0000017123d6f996589bc2e58bb5502218012ac7f527ab599a3be84c1951c669"
+        );
+        assert_eq!(
+            block_hash(Network::NusacoinTestnet, &header).to_string(),
+            "0000017123d6f996589bc2e58bb5502218012ac7f527ab599a3be84c1951c669"
+        );
+    }
+
+    /// Other networks keep rust-bitcoin's SHA256d block hash.
+    #[test]
+    #[cfg(not(feature = "liquid"))]
+    fn bitcoin_block_hash_unchanged() {
+        let raw = hex_to_bytes(
+            "0100000000000000000000000000000000000000000000000000000000000000000000009bfd61aa387643ae280ad4d29bceb017541657fd213d0ef2df59d2a7ddda0e666fdb2c69f0ff0f1e4ea7be01",
+        );
+        let header: BlockHeader = deserialize(&raw).unwrap();
+        assert_eq!(block_hash(Network::Bitcoin, &header), header.block_hash());
+        // ... which is NOT the daemon's X11 hash of the same header.
+        assert_ne!(
+            block_hash(Network::Bitcoin, &header).to_string(),
+            "0000017123d6f996589bc2e58bb5502218012ac7f527ab599a3be84c1951c669"
+        );
     }
 }
