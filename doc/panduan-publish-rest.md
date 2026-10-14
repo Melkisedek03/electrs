@@ -9,7 +9,7 @@ menjalankan node sendiri.
 > Yang perlu dilakukan hanya mengubah bind address dan memasang
 > Cloudflare di depannya.
 
-> **Catatan:** seluruh panduan memakai `api.nusacoin.org` sebagai contoh.
+> **Catatan:** seluruh panduan memakai `SUBDOMAIN` sebagai contoh.
 > Ganti dengan subdomain-mu di semua langkah (file sertifikat, konfigurasi
 > nginx, dan DNS record).
 
@@ -30,16 +30,16 @@ tahun, dan otomatis dipercaya Cloudflare (tidak perlu renewal tiap
 3. Pilih:
    - *Generate private key and CSR with Cloudflare*: **RSA**
    - *Certificate Validity*: **15 years**
-   - Hostnames: `api.nusacoin.org` (ganti dengan subdomainmu)
+   - Hostnames: `SUBDOMAIN` (ganti dengan subdomainmu)
 4. Klik **Create** → simpan isi **Origin Certificate** dan **Private Key**
    ke VPS:
    ```bash
    sudo mkdir -p /etc/nginx/cf-origin
    # tempel sertifikat:
-   sudo nano /etc/nginx/cf-origin/api.nusacoin.org.pem
+   sudo nano /etc/nginx/cf-origin/SUBDOMAIN.pem
    # tempel private key:
-   sudo nano /etc/nginx/cf-origin/api.nusacoin.org.key
-   sudo chmod 600 /etc/nginx/cf-origin/api.nusacoin.org.key
+   sudo nano /etc/nginx/cf-origin/SUBDOMAIN.key
+   sudo chmod 600 /etc/nginx/cf-origin/SUBDOMAIN.key
    ```
 
    > Nama file bebas — boleh `cert.pem` atau apa pun. Yang penting:
@@ -64,10 +64,10 @@ Tempel konfigurasi berikut ke dalam file tersebut, lalu simpan:
 ```nginx
 server {
     listen 443 ssl;
-    server_name api.nusacoin.org;  # ganti dengan domainmu
+    server_name SUBDOMAIN;  # ganti dengan domainmu
 
-    ssl_certificate /etc/nginx/cf-origin/api.nusacoin.org.pem;
-    ssl_certificate_key /etc/nginx/cf-origin/api.nusacoin.org.key;
+    ssl_certificate /etc/nginx/cf-origin/SUBDOMAIN.pem;
+    ssl_certificate_key /etc/nginx/cf-origin/SUBDOMAIN.key;
 
     location / {
         proxy_pass http://127.0.0.1:3010;
@@ -83,7 +83,7 @@ Setelah file tersimpan, aktifkan site dan reload nginx (perintah terminal, bukan
 ```bash
 sudo ln -s /etc/nginx/sites-available/electrs-rest /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-curl -sk -H "Host: api.nusacoin.org" https://127.0.0.1/blocks/tip/height  # tes lokal via nginx
+curl -sk -H "Host: SUBDOMAIN" https://127.0.0.1/blocks/tip/height  # tes lokal via nginx
 # PENTING: header Host wajib diisi nama subdomainmu — tanpa ini nginx
 # memakai vhost default (bukan blok electrs) dan mengembalikan error
 # "Cannot GET /..." dari aplikasi lain.
@@ -92,7 +92,7 @@ curl -sk -H "Host: api.nusacoin.org" https://127.0.0.1/blocks/tip/height  # tes 
 ## 4. Setting Cloudflare (mode Full strict)
 
 1. Menu kiri: **DNS** → **Records** → **Add record**:
-   - Type: `A`, Name: `api` (jadi `api.nusacoin.org`), IPv4 address: IP VPS,
+   - Type: `A`, Name: label pertama subdomainmu (mis. `api`), IPv4 address: IP VPS,
      Proxy status: **Proxied** (awan oranye 🟠) → **Save**.
 2. Menu kiri: **SSL/TLS** → **Overview**.
 3. Pada *"Your SSL/TLS encryption mode"*, klik tombol **Configure**,
@@ -146,10 +146,10 @@ sudo ufw enable
 ## 6. Tes
 
 ```bash
-curl -s https://api.nusacoin.org/blocks/tip/height
+curl -s https://SUBDOMAIN/blocks/tip/height
 # harus mengembalikan tinggi block, mis. 73637
 
-curl -s https://api.nusacoin.org/blocks/tip/hash
+curl -s https://SUBDOMAIN/blocks/tip/hash
 # harus mengembalikan hash tip
 ```
 
