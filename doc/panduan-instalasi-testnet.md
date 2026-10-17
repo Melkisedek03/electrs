@@ -92,9 +92,13 @@ After=network.target
 
 [Service]
 User=electrs
+# PENTING: --daemon-dir diisi dengan BASE datadir (tanpa "testnet3")!
+# electrs otomatis menambahkan subfolder "testnet3" untuk network
+# nusacoin-testnet. Jika diisi "/root/.nusacoin/testnet3", electrs akan
+# mencari block di "/root/.nusacoin/testnet3/testnet3/blocks" yang tidak ada.
 ExecStart=/usr/local/bin/electrs \
   --network nusacoin-testnet \
-  --daemon-dir /root/.nusacoin/testnet3 \
+  --daemon-dir /root/.nusacoin \
   --daemon-rpc-addr 127.0.0.1:18332 \
   --cookie "ISI_RPCUSER:ISI_RPCPASSWORD" \
   --db-dir /var/lib/electrs-nusacoin-testnet \
@@ -178,13 +182,21 @@ umumnya mode 700). Beri hak traverse di tiap parent (lihat langkah 4).
 
 ### Indexing gagal total: `failed to index N blocks from blk*.dat files`
 
-Artinya tidak satu pun block di file `blk*.dat` cocok dengan header dari
-daemon. Penyebab yang pernah terjadi: file blk berisi **chain lama**
-(hasil fork yang sudah ditinggalkan), sementara daemon melayani chain
-yang baru. Gejalanya: jumlah block di file masuk akal, magic benar,
-tapi 0 yang cocok.
+Kemungkinan penyebab, urut dari yang paling sering:
 
-Solusi bersih: stop daemon testnet, hapus data basi, sync ulang:
+1. **`--daemon-dir` salah (paling sering di testnet!)** — electrs otomatis
+   menambahkan subfolder network (`testnet3` untuk nusacoin-testnet) ke
+   `--daemon-dir`. Jika `--daemon-dir` sudah berisi `testnet3`, electrs
+   mencari block di `<dir>/testnet3/testnet3/blocks` yang tidak ada, sehingga
+   0 file blk dibaca. Gejala khas: tidak ada baris `block file reading` di
+   log. Solusi: isi `--daemon-dir` dengan base datadir saja
+   (mis. `/root/.nusacoin`), bukan `/root/.nusacoin/testnet3`.
+2. **File blk berisi chain lama** (hasil fork yang sudah ditinggalkan),
+   sementara daemon melayani chain yang baru. Gejalanya: jumlah block di
+   file masuk akal, magic benar, tapi 0 yang cocok. Solusi bersih: stop
+   daemon testnet, hapus data basi, sync ulang (lihat di bawah). **Catatan:**
+   setelah wipe, pasang ulang ACL (lihat langkah 4) karena ACL ikut
+   terhapus!
 
 ```bash
 nusacoin-cli -testnet stop
