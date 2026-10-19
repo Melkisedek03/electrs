@@ -153,7 +153,32 @@ curl -s http://127.0.0.1:3011/blocks/tip/height
 # harus balik tinggi block testnet
 ```
 
-## 8. Troubleshooting
+## 8. Cara update binary
+
+Saat ada versi baru (mis. perbaikan bug), binary di-update tanpa
+menghapus database — index yang sudah ada tetap dipakai.
+
+```bash
+# 1. download binary baru dari artifact CI
+curl -L -o /tmp/electrs-new <link_binary>
+
+# 2. verifikasi checksum (wajib)
+# SHA256 dipublikasikan bersama <commit hash> di halaman CI
+echo "<sha256>  /tmp/electrs-new" | sha256sum -c
+# harus keluar: /tmp/electrs-new: OK
+
+# 3. stop service, ganti binary, start lagi
+# (pastikan tidak ada proses lama yang nyangkut menahan port)
+sudo pkill -9 electrs; sleep 2
+sudo install -m 755 /tmp/electrs-new /usr/local/bin/electrs
+sudo systemctl start electrs-nusacoin-testnet.service
+
+# 4. verifikasi
+sudo journalctl -u electrs-nusacoin-testnet.service -n 10 --no-pager | grep -E "startup complete|ERROR"
+curl -s http://127.0.0.1:3011/blocks/tip/height
+```
+
+## 9. Troubleshooting
 
 ### `chown: invalid user: 'electrs:electrs'`
 

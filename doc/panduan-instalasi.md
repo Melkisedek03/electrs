@@ -213,7 +213,35 @@ ssh -f -N -L 3010:127.0.0.1:3010 <user>@<ip-vps>
 # lalu akses http://localhost:3010 dari komputer sendiri
 ```
 
-## 9. Troubleshooting
+## 9. Cara update binary
+
+Saat ada versi baru (mis. perbaikan bug), binary di-update tanpa
+menghapus database — index yang sudah ada tetap dipakai.
+
+```bash
+# 1. download binary baru dari artifact CI
+curl -L -o /tmp/electrs-new <link_binary>
+
+# 2. verifikasi checksum (wajib)
+# SHA256 dipublikasikan bersama <commit hash> di halaman CI
+echo "<sha256>  /tmp/electrs-new" | sha256sum -c
+# harus keluar: /tmp/electrs-new: OK
+
+# 3. stop service, ganti binary, start lagi
+sudo systemctl stop electrs-nusacoin.service
+sudo install -m 755 /tmp/electrs-new /usr/local/bin/electrs
+sudo systemctl start electrs-nusacoin.service
+
+# 4. verifikasi
+sudo journalctl -u electrs-nusacoin.service -n 10 --no-pager | grep -E "startup complete|ERROR"
+curl -s http://127.0.0.1:3010/blocks/tip/height
+```
+
+Catatan: jika service gagal start dengan pesan `failed to start monitoring
+HTTP server`, kemungkinan proses lama masih menahan port. Bunuh manual
+dulu: `sudo pkill -9 electrs`, lalu start lagi.
+
+## 10. Troubleshooting
 
 | Gejala di log | Penyebab & solusi |
 |---------------|-------------------|
@@ -225,7 +253,7 @@ ssh -f -N -L 3010:127.0.0.1:3010 <user>@<ip-vps>
 **Index ulang dari nol:** hentikan service, hapus isi `--db-dir`, jalankan
 lagi — electrs akan index ulang dari genesis.
 
-## 10. Buka akses publik (untuk listing Komodo)
+## 11. Buka akses publik (untuk listing Komodo)
 
 Wallet/client DEX butuh server Electrum yang bisa diakses publik. electrs
 hanya bicara TCP polos — untuk TLS pasang `stunnel`:
@@ -260,7 +288,7 @@ Untuk pengajuan listing ke Komodo (`KomodoPlatform/coins`), sediakan minimal
 - `coins` — entri coin + `icons/nux.png` (82x82)
 - bukti atomic-swap via Komodo DeFi Framework API
 
-## 11. Catatan operasional
+## 12. Catatan operasional
 
 - **Chain Nusacoin jarang ada block** (±98 menit/block di 2026). Client akan
   melihat konfirmasi lambat — itu perilaku chain, bukan masalah indexer.
