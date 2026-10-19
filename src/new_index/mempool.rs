@@ -706,9 +706,9 @@ impl Mempool {
             // Refresh cached backlog stats after evictions, not just on additions.
             // Without this, evictions followed by no new transactions hit the early
             // return below, leaving stale stats (e.g. count=1 on an empty mempool).
-            if mempool.backlog_stats.1.elapsed() > Duration::from_secs(BACKLOG_STATS_TTL) {
-                mempool.update_backlog_stats();
-            }
+            // Always refresh here (ignoring TTL): evictions are infrequent and the
+            // stats must reflect removals promptly.
+            mempool.update_backlog_stats();
         } // avoids acquiring a lock when there are no evictions
 
         // Find transactions available in bitcoind's mempool but not indexed locally
