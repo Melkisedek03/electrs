@@ -56,16 +56,19 @@ sudo -u nusacoin nusacoin-cli -datadir=/home/nusacoin/.nusacoin getblockchaininf
 
 ## 3. Download binary electrs
 
-Download artifact `electrs-nusacoin-linux-x86_64` dari
-[halaman GitHub Actions](https://github.com/Melkisedek03/electrs/actions)
-(pilih run terbaru yang hijau). Lalu verifikasi checksum-nya — **jangan
-lewatkan langkah ini**:
+Download binary resmi dari halaman rilis GitHub
+(v0.4.1-nux1):
 
 ```bash
-cd /tmp
-# (sesuaikan dengan file yang di-download)
-sha256sum electrs-nusacoin-linux-x86_64
-# cocokkan dengan checksum yang dipublikasikan di halaman rilis/CI
+curl -L -o /tmp/electrs-nusacoin-linux-x86_64 \
+  https://github.com/Melkisedek03/electrs/releases/download/v0.4.1-nux1/electrs-nusacoin-linux-x86_64
+```
+
+Lalu verifikasi checksum-nya — **jangan lewatkan langkah ini**:
+
+```bash
+echo "64148108350493d9d0e8281a3d12e388f8701c204292ed2ee1e3cd99a8edb573  /tmp/electrs-nusacoin-linux-x86_64" | sha256sum -c
+# harus keluar: /tmp/electrs-nusacoin-linux-x86_64: OK
 ```
 
 Pasang binary-nya:
@@ -219,12 +222,12 @@ Saat ada versi baru (mis. perbaikan bug), binary di-update tanpa
 menghapus database — index yang sudah ada tetap dipakai.
 
 ```bash
-# 1. download binary baru dari artifact CI
-curl -L -o /tmp/electrs-new <link_binary>
+# 1. download binary baru dari halaman rilis GitHub (v0.4.1-nux1)
+curl -L -o /tmp/electrs-new https://github.com/Melkisedek03/electrs/releases/download/v0.4.1-nux1/electrs-nusacoin-linux-x86_64
 
 # 2. verifikasi checksum (wajib)
-# SHA256 dipublikasikan bersama <commit hash> di halaman CI
-echo "<sha256>  /tmp/electrs-new" | sha256sum -c
+# SHA256 dipublikasikan di halaman rilis (commit 934616c4)
+echo "64148108350493d9d0e8281a3d12e388f8701c204292ed2ee1e3cd99a8edb573  /tmp/electrs-new" | sha256sum -c
 # harus keluar: /tmp/electrs-new: OK
 
 # 3. stop service, ganti binary, start lagi

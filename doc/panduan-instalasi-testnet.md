@@ -29,17 +29,16 @@ Pastikan `"chain": "test"` dan `blocks` == `headers`. Nama folder
 
 ## 2. Download binary electrs
 
-Ambil binary resmi dari artifact CI (build `checkbuild` di branch
-`new-index`):
+Ambil binary resmi dari halaman rilis GitHub (v0.4.1-nux1):
 
 ```bash
-curl -L -o /tmp/electrs <URL_ARTIFACT_CI>
+curl -L -o /tmp/electrs https://github.com/Melkisedek03/electrs/releases/download/v0.4.1-nux1/electrs-nusacoin-linux-x86_64
 ```
 
 Verifikasi checksum (wajib):
 
 ```bash
-echo "<SHA256_YANG_DIPUBLIKASIKAN>  /tmp/electrs" | sha256sum -c
+echo "64148108350493d9d0e8281a3d12e388f8701c204292ed2ee1e3cd99a8edb573  /tmp/electrs" | sha256sum -c
 # harus keluar: /tmp/electrs: OK
 ```
 
@@ -159,12 +158,12 @@ Saat ada versi baru (mis. perbaikan bug), binary di-update tanpa
 menghapus database — index yang sudah ada tetap dipakai.
 
 ```bash
-# 1. download binary baru dari artifact CI
-curl -L -o /tmp/electrs-new <link_binary>
+# 1. download binary baru dari halaman rilis GitHub (v0.4.1-nux1)
+curl -L -o /tmp/electrs-new https://github.com/Melkisedek03/electrs/releases/download/v0.4.1-nux1/electrs-nusacoin-linux-x86_64
 
 # 2. verifikasi checksum (wajib)
-# SHA256 dipublikasikan bersama <commit hash> di halaman CI
-echo "<sha256>  /tmp/electrs-new" | sha256sum -c
+# SHA256 dipublikasikan di halaman rilis (commit 934616c4)
+echo "64148108350493d9d0e8281a3d12e388f8701c204292ed2ee1e3cd99a8edb573  /tmp/electrs-new" | sha256sum -c
 # harus keluar: /tmp/electrs-new: OK
 
 # 3. stop service, ganti binary, start lagi
